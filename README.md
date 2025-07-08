@@ -1,8 +1,21 @@
+<div align="center">
+
 # mattermost-forgejo-devin
+
+![](https://github.com/user-attachments/assets/7a1369a3-b49b-45ac-8833-6e90b3efa2f9)
+
+<p>
+  <img src="https://img.shields.io/badge/Python-3.8+-blue?logo=python" />
+  <img src="https://img.shields.io/badge/Flask-2.3+-green?logo=flask" />
+  <img src="https://img.shields.io/badge/Mattermost-Chat-blue?logo=mattermost" />
+  <img src="https://img.shields.io/badge/Forgejo-Git-orange?logo=git" />
+</p>
 
 **Self-hosted AI dev assistant with Mattermost & Forgejo integration**
 
 MattermostとForgejoを連携させるPythonブリッジサーバー - オープンソース版Devinを目指したセルフホスト開発支援ツール
+
+</div>
 
 ## 🎯 概要
 
