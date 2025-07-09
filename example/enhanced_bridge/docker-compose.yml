@@ -1,0 +1,79 @@
+version: '3.8'
+
+services:
+  # Mattermost-Forgejo Enhanced Bridge
+  bridge:
+    build: .
+    ports:
+      - "5005:5005"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - FORGEJO_URL=${FORGEJO_URL:-http://localhost:3000}
+      - FORGEJO_CLIENT_ID=${FORGEJO_CLIENT_ID}
+      - FORGEJO_CLIENT_SECRET=${FORGEJO_CLIENT_SECRET}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET}
+      - MATTERMOST_TOKEN=${MATTERMOST_TOKEN}
+      - MATTERMOST_WEBHOOK_URL=${MATTERMOST_WEBHOOK_URL}
+      - MATTERMOST_API_URL=${MATTERMOST_API_URL:-http://mattermost:8065}
+      - MATTERMOST_API_TOKEN=${MATTERMOST_API_TOKEN}
+      - BASE_URL=${BASE_URL:-http://localhost:5005}
+      - FLASK_SECRET_KEY=${FLASK_SECRET_KEY}
+      - PORT=5005
+      - DEBUG=${DEBUG:-false}
+    depends_on:
+      - mattermost
+    restart: unless-stopped
+    networks:
+      - bridge-network
+
+  # PostgreSQL Database for Mattermost
+  postgres:
+    image: postgres:13-alpine
+    environment:
+      - POSTGRES_DB=mattermost
+      - POSTGRES_USER=mattermost
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-mattermost_password}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    networks:
+      - bridge-network
+
+  # Mattermost Team Communication
+  mattermost:
+    image: mattermost/mattermost-team-edition:latest
+    ports:
+      - "8065:8065"
+    volumes:
+      - mattermost-data:/mattermost/data
+      - mattermost-logs:/mattermost/logs
+      - mattermost-config:/mattermost/config
+      - mattermost-plugins:/mattermost/plugins
+    environment:
+      - MM_SQLSETTINGS_DRIVERNAME=postgres
+      - MM_SQLSETTINGS_DATASOURCE=postgres://mattermost:${POSTGRES_PASSWORD:-mattermost_password}@postgres:5432/mattermost?sslmode=disable&connect_timeout=10
+      - MM_SERVICESETTINGS_SITEURL=${MATTERMOST_SITE_URL:-http://localhost:8065}
+      - MM_SERVICESETTINGS_ENABLELOCALMODE=true
+      - MM_SERVICESETTINGS_ENABLEDEVELOPER=true
+    depends_on:
+      - postgres
+    restart: unless-stopped
+    networks:
+      - bridge-network
+
+volumes:
+  postgres-data:
+    driver: local
+  mattermost-data:
+    driver: local
+  mattermost-logs:
+    driver: local
+  mattermost-config:
+    driver: local
+  mattermost-plugins:
+    driver: local
+
+networks:
+  bridge-network:
+    driver: bridge
