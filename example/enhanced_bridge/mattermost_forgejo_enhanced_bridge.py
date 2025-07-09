@@ -63,8 +63,6 @@ def init_db():
         )
     ''')
     
-
-    
     conn.commit()
     conn.close()
 
@@ -193,7 +191,7 @@ class MattermostAPI:
             return None
 
 def get_user_token(mattermost_user_id):
-    """DBからユーザートークンを取得"""
+    """DBからユーザートークンを取得（期限切れチェック付き）"""
     conn = sqlite3.connect('bridge.db')
     cursor = conn.cursor()
     
@@ -208,12 +206,42 @@ def get_user_token(mattermost_user_id):
     
     if result:
         access_token, forgejo_username, expires_at = result
-        # トークンの有効期限チェック（簡易版）
+        
+        # 期限切れチェックを実装
+        if expires_at:
+            try:
+                expire_time = datetime.fromisoformat(expires_at)
+                if datetime.now() >= expire_time:
+                    logger.warning(f"Token expired for user {mattermost_user_id} at {expires_at}")
+                    return None  # 期限切れは無効
+            except ValueError:
+                logger.error(f"Invalid date format for expires_at: {expires_at}")
+                return None
+        
         return {
             'access_token': access_token,
             'forgejo_username': forgejo_username
         }
     return None
+
+def delete_user_token(mattermost_user_id):
+    """指定ユーザーのトークンを削除"""
+    conn = sqlite3.connect('bridge.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        DELETE FROM user_tokens 
+        WHERE mattermost_user_id = ?
+    ''', (mattermost_user_id,))
+    
+    deleted_count = cursor.rowcount
+    conn.commit()
+    conn.close()
+    
+    if deleted_count > 0:
+        logger.info(f"Deleted expired token for user {mattermost_user_id}")
+    
+    return deleted_count > 0
 
 def save_user_token(mattermost_user_id, mattermost_username, token_data, forgejo_username):
     """ユーザートークンをDBに保存"""
@@ -291,6 +319,7 @@ def root():
     return jsonify({
         'message': 'Mattermost-Forgejo OAuth2 Bridge Server',
         'status': 'running',
+        'version': '4.0.0-enhanced-auth',
         'endpoints': ['/webhook', '/auth/connect', '/auth/callback', '/health', '/debug']
     })
 
@@ -419,49 +448,134 @@ def handle_slash_command(data):
         
         logger.info(f"Processing slash command from user: {username} (ID: {user_id})")
         
+        # 認証専用コマンド（自動トークン削除付き）
+        if text == 'auth' or text == 'login' or text == 'connect':
+            # 古いトークンを自動削除
+            deleted = delete_user_token(user_id)
+            delete_message = "🧹 古いトークンを削除しました。" if deleted else ""
+            
+            connect_url = f"{BASE_URL}/auth/connect?user_id={user_id}&username={username}"
+            return jsonify({
+                'response_type': 'ephemeral',
+                'text': f'''🔐 **Forgejo認証を開始**
+
+{delete_message}
+
+**認証手順:**
+1. 下記リンクをクリック → Forgejoで認証
+2. 成功後、`/issue status` で確認
+3. Issue作成: `/issue <owner> <repo> <title>`
+
+**認証URL:** {connect_url}
+
+💡 認証後は自動的にトークンが更新されます。'''
+            })
+        
+        # ステータス確認（詳細情報付き）
+        if text == 'status':
+            user_token = get_user_token(user_id)
+            if user_token:
+                # トークンの有効期限も表示
+                conn = sqlite3.connect('bridge.db')
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT expires_at FROM user_tokens 
+                    WHERE mattermost_user_id = ?
+                ''', (user_id,))
+                result = cursor.fetchone()
+                conn.close()
+                
+                expires_info = ""
+                if result and result[0]:
+                    try:
+                        expire_time = datetime.fromisoformat(result[0])
+                        time_remaining = expire_time - datetime.now()
+                        if time_remaining.total_seconds() > 0:
+                            days = time_remaining.days
+                            hours = time_remaining.seconds // 3600
+                            expires_info = f"\n⏰ **有効期限:** あと{days}日{hours}時間"
+                        else:
+                            expires_info = f"\n⚠️ **有効期限:** 期限切れ - `/issue auth` で再認証してください"
+                    except:
+                        expires_info = "\n⚠️ **有効期限:** 不明"
+                
+                return jsonify({
+                    'response_type': 'ephemeral',
+                    'text': f'''✅ **Forgejo接続中**
+
+**Forgejoユーザー:** {user_token["forgejo_username"]}
+**Mattermostユーザー:** {username}{expires_info}
+
+**利用可能コマンド:**
+- `/issue <owner> <repo> <title>` - Issue作成
+- `/issue auth` - 再認証
+- `/issue status` - 接続状況確認'''
+                })
+            else:
+                connect_url = f"{BASE_URL}/auth/connect?user_id={user_id}&username={username}"
+                return jsonify({
+                    'response_type': 'ephemeral',
+                    'text': f'''❌ **Forgejo未接続**
+
+認証が必要です。以下のコマンドで接続してください：
+
+**Quick Auth:** `/issue auth`
+
+または直接リンク: {connect_url}'''
+                })
+        
+        # 強制再認証コマンド
+        if text == 'reset' or text == 'reauth':
+            delete_user_token(user_id)
+            connect_url = f"{BASE_URL}/auth/connect?user_id={user_id}&username={username}"
+            return jsonify({
+                'response_type': 'ephemeral',
+                'text': f'''🔄 **強制再認証**
+
+全てのトークンを削除しました。
+新しい認証を開始してください: {connect_url}
+
+**次回から:** `/issue auth` でも同じ操作ができます。'''
+            })
+        
         # OAuth2認証チェック
         user_token = get_user_token(user_id)
         if not user_token:
             connect_url = f"{BASE_URL}/auth/connect?user_id={user_id}&username={username}"
             return jsonify({
                 'response_type': 'ephemeral',
-                'text': f'🔐 **Authentication Required**\n\nPlease connect your Forgejo account first:\n{connect_url}\n\nAfter connecting, you can use the `/issue` command.'
+                'text': f'''🔐 **認証が必要です**
+
+**簡単認証:** `/issue auth`
+
+または: {connect_url}
+
+認証後、Issue作成コマンドが利用可能になります。'''
             })
         
         # ヘルプまたは空のコマンド
         if not text:
             return jsonify({
                 'response_type': 'ephemeral',
-                'text': f'''**Usage**: `/issue <owner> <repo> <title> [body]`
+                'text': f'''**Mattermost ↔ Forgejo Bridge**
 
-**One-command Issue Creation:**
-You can create an issue with detailed description in a single command:
+**接続中:** {user_token['forgejo_username']} ✅
 
-**Connected as**: {user_token['forgejo_username']}
+**コマンド一覧:**
+• `/issue auth` - 認証・再認証
+• `/issue status` - 接続状況・有効期限確認
+• `/issue reset` - 強制再認証
+• `/issue <owner> <repo> <title>` - Issue作成
 
-**Example:**
+**Issue作成例:**
 ```
-/issue myorg myrepo "Add authentication feature"
+/issue Sunwood-ai-labs oh-demo-004-sim "Fix bug"
 
-## Description
-We need to implement user authentication with the following requirements:
+## 詳細説明
+バグの詳細をここに記述...
+```
 
-### Features needed:
-- Login/logout functionality
-- Password reset
-- Session management
-
-### Code example:
-\`\`\`python
-def authenticate_user(username, password):
-    # Implementation here
-    return validate_credentials(username, password)
-\`\`\`
-
-### Additional notes:
-- Should integrate with existing user database
-- Need to add proper error handling
-```'''
+**トラブル時:** `/issue auth` で解決することが多いです。'''
             })
         
         # テキストを行ごとに分割してパース
@@ -473,7 +587,20 @@ def authenticate_user(username, password):
         if len(parts) < 3:
             return jsonify({
                 'response_type': 'ephemeral',
-                'text': '❌ **Error**: Please provide all required parameters.\n\nUsage: `/issue <owner> <repo> <title> [detailed_body]`\n\nExample:\n```\n/issue myorg myrepo "Bug fix"\n\nDetailed description here...\n```'
+                'text': '''❌ **Error**: Please provide all required parameters.
+
+**Usage:** `/issue <owner> <repo> <title> [detailed_body]`
+
+**Example:**
+```
+/issue myorg myrepo "Bug fix"
+
+Detailed description here...
+```
+
+**Other commands:**
+- `/issue auth` - 認証
+- `/issue status` - 状況確認'''
             })
         
         owner, repo, title = parts
@@ -486,9 +613,26 @@ def authenticate_user(username, password):
         # 権限チェック
         forgejo_api = ForgejoAPI(FORGEJO_URL, user_token['access_token'])
         if not forgejo_api.check_repo_access(owner, repo):
+            # デバッグ情報も含める
+            url = f"{FORGEJO_URL}/api/v1/repos/{owner}/{repo}"
+            headers = {'Authorization': f'Bearer {user_token["access_token"]}'}
+            response = requests.get(url, headers=headers)
+            logger.error(f"Access denied for {user_token['forgejo_username']} to {owner}/{repo}")
+            logger.error(f"API Response Status: {response.status_code}")
+            
             return jsonify({
                 'response_type': 'ephemeral',
-                'text': f'❌ **Access Denied**\n\nYou don\'t have access to repository `{owner}/{repo}`.\n\nConnected as: {user_token["forgejo_username"]}'
+                'text': f'''❌ **Access Denied**
+
+リポジトリ `{owner}/{repo}` にアクセスできません。
+
+**接続中:** {user_token["forgejo_username"]}
+**Status Code:** {response.status_code}
+
+**解決方法:**
+1. `/issue auth` - 再認証
+2. リポジトリのアクセス権限を確認
+3. リポジトリ名・オーナー名のスペルチェック'''
             })
         
         # Issue本文を作成
@@ -510,7 +654,14 @@ def authenticate_user(username, password):
         if issue:
             logger.info(f"Created issue #{issue['number']}: {title}")
             
-            response_text = f'✅ **Issue Created Successfully!**\n\n**Title:** {title}\n**Repository:** {owner}/{repo}\n**Issue #{issue["number"]}:** {issue["html_url"]}\n**Created as:** {user_token["forgejo_username"]}\n\n*This thread will receive updates when the issue is updated.*'
+            response_text = f'''✅ **Issue Created Successfully!**
+
+**Title:** {title}
+**Repository:** {owner}/{repo}
+**Issue #{issue["number"]}:** {issue["html_url"]}
+**Created as:** {user_token["forgejo_username"]}
+
+*This thread will receive updates when the issue is updated.*'''
             
             # Mattermostにメッセージを投稿
             root_message_id = None
@@ -537,14 +688,24 @@ def authenticate_user(username, password):
         else:
             return jsonify({
                 'response_type': 'ephemeral',
-                'text': '❌ **Failed to create issue**\n\nPlease check your permissions and try again.'
+                'text': '''❌ **Failed to create issue**
+
+**解決方法:**
+1. `/issue auth` - 再認証
+2. `/issue status` - 接続状況確認
+3. リポジトリのアクセス権限を確認'''
             })
             
     except Exception as e:
         logger.error(f"Error processing slash command: {e}")
         return jsonify({
             'response_type': 'ephemeral',
-            'text': f'❌ **Internal Error:** {str(e)}'
+            'text': f'''❌ **Internal Error:** {str(e)}
+
+**解決方法:**
+1. `/issue auth` - 再認証
+2. `/issue status` - 状況確認
+3. それでも解決しない場合は管理者にお問い合わせください。'''
         })
 
 def verify_forgejo_webhook(request_headers, request_body):
@@ -663,8 +824,53 @@ def health():
     return jsonify({
         'status': 'healthy',
         'timestamp': datetime.now().isoformat(),
-        'version': '3.2.0-single-command',
-        'oauth2_configured': bool(FORGEJO_CLIENT_ID and FORGEJO_CLIENT_SECRET)
+        'version': '4.0.0-enhanced-auth',
+        'oauth2_configured': bool(FORGEJO_CLIENT_ID and FORGEJO_CLIENT_SECRET),
+        'features': [
+            'Auto token cleanup',
+            'Enhanced authentication',
+            'Expiration checking',
+            'Status monitoring',
+            'Force re-auth'
+        ]
+    })
+
+@app.route('/debug', methods=['GET'])
+def debug():
+    """デバッグ情報"""
+    conn = sqlite3.connect('bridge.db')
+    cursor = conn.cursor()
+    
+    # アクティブなトークン数
+    cursor.execute('SELECT COUNT(*) FROM user_tokens')
+    token_count = cursor.fetchone()[0]
+    
+    # Issue-スレッドマッピング数
+    cursor.execute('SELECT COUNT(*) FROM issue_thread_mapping')
+    mapping_count = cursor.fetchone()[0]
+    
+    # 期限切れトークン数
+    cursor.execute('''
+        SELECT COUNT(*) FROM user_tokens 
+        WHERE expires_at < datetime('now')
+    ''')
+    expired_count = cursor.fetchone()[0]
+    
+    conn.close()
+    
+    return jsonify({
+        'status': 'debug',
+        'database': {
+            'total_tokens': token_count,
+            'expired_tokens': expired_count,
+            'active_mappings': mapping_count
+        },
+        'config': {
+            'forgejo_url': FORGEJO_URL,
+            'oauth_configured': bool(FORGEJO_CLIENT_ID and FORGEJO_CLIENT_SECRET),
+            'webhook_secret_set': bool(WEBHOOK_SECRET),
+            'mattermost_api_configured': bool(MATTERMOST_API_URL and MATTERMOST_API_TOKEN)
+        }
     })
 
 if __name__ == '__main__':
@@ -672,8 +878,8 @@ if __name__ == '__main__':
         logger.error("FORGEJO_CLIENT_ID and FORGEJO_CLIENT_SECRET environment variables are required")
         exit(1)
     
-    port = int(os.getenv('PORT', 5000))
+    port = int(os.getenv('PORT', 5005))
     debug = os.getenv('DEBUG', 'False').lower() == 'true'
     
-    logger.info(f"Starting OAuth2 bridge server with single-command support on port {port}")
+    logger.info(f"Starting OAuth2 bridge server v4.0.0 with enhanced authentication on port {port}")
     app.run(host='0.0.0.0', port=port, debug=debug)
