@@ -47,34 +47,33 @@ cd mattermost-forgejo-devin
 
 # 依存関係をインストール
 uv sync
-
-# 環境変数を設定
-cp .env.example .env
 ```
 
 ### 環境設定
 
-`.env`ファイルを編集：
+各ブリッジごとに example/xxx_bridge/ ディレクトリが用意されています。
+利用したいブリッジのディレクトリに移動し、`.env.example` をコピーして `.env` を作成し、必要な値を編集してください。
+
+例: Enhanced Bridge を使う場合
 
 ```bash
-# Forgejo設定
-FORGEJO_URL=http://192.168.0.131:3000
-FORGEJO_TOKEN=your_forgejo_personal_access_token
-
-# Mattermost設定
-MATTERMOST_TOKEN=your_mattermost_slash_command_token
-WEBHOOK_SECRET=your_webhook_secret
-
-# サーバー設定
-PORT=5000
-DEBUG=false
+cd example/enhanced_bridge
+cp .env.example .env
+# .env をエディタで編集
 ```
+
+`.env.example` の内容は各ブリッジごとに異なります。
+**自分が使いたいブリッジの example/xxx_bridge/.env.example を必ず確認してください。**
 
 ### サーバー起動
 
+利用したいブリッジのディレクトリで、下記のように実行します。
+
 ```bash
-uv run python mattermost_forgejo_bridge.py
+uv run python example/enhanced_bridge/mattermost_forgejo_enhanced_bridge.py
 ```
+
+他のブリッジを使う場合は、example/xxx_bridge/mattermost_forgejo_xxx_bridge.py を指定してください。
 
 ## ⚙️ セットアップガイド
 
